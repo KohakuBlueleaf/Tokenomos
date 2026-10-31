@@ -1,0 +1,21 @@
+{
+  "linux": {
+    "models": "/data/models",
+    "rows": "/data/calib_rows.jsonl",
+    "cards": {"5090": [0, 1, 2, 3]},
+    "cap": 0,
+    "path": "/usr/local/cuda-13.0/bin:/data/venv/bin",
+    "pythonpath": "src",
+    "env": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"},
+    "kohaku": "/data/KohakuvLLM/src",
+    "gbc": "/data/gbc_run.sh"
+  },
+  "windows": {
+    "models": "D:\\models",
+    "rows": "D:\\models\\calib_rows.jsonl",
+    "cards": {"4090": [0]},
+    "cap": 19,
+    "pythonpath": "src",
+    "hub": "D:\\hub"
+  }
+}
