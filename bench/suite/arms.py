@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 class Arm:
     tag: str
     card: str
-    # tests, tune, decode, caption, serve, vllm, vllm_serve, gbc
+    # tests, tune, decode, caption, serve, vllm, vllm_serve, vllm_raw, vllm_wall, gbc
     kind: str
     model: str = ""
     arch: dict = field(default_factory=dict)
@@ -43,7 +43,7 @@ TOKENOMOS_5090 = {
 RESERVE = {"g12": {"kv_reserve": 4 << 30}, "g31": {"kv_reserve": 2 << 30}}
 GDN_STATE = {"KOHAKU_GDN_STATE": "int8"}
 KOHAKU_5090 = {
-    "lfm3": ("lfm3-vl-2b-mxfp8", {}),
+    "lfm3": ("lfm3-vl-2b-mxfp8", {"KOHAKU_MXFP8": "1"}),
     "q4": ("qwen35-4b-mlp4-mxfp8", GDN_STATE),
     "q9": ("qwen35-9b-nvfp4", GDN_STATE),
     "q27": ("qwen38-27b-nvfp4-full", {**GDN_STATE, "KOHAKU_NVFP4": "norm,quant,head=nvfp4"}),
@@ -56,6 +56,15 @@ STOCK_5090 = {
     "q27": "qwen38-27b-nvfp4-full",
     "g31": "gemma4-31b-it-nvfp4-redhat",
 }
+# vLLM has no LFM3: the plugin registers the model and no kernel of its own but the width-7 conv,
+# which no vLLM kernel covers; every linear, attention and sampler stays vLLM's
+STOCK_LFM3 = {
+    "mxfp8": "lfm3-vl-2b-mxfp8",
+    "fp8": "lfm3-vl-2b-fp8",
+    "nvfp4": "lfm3-vl-2b-nvfp4",
+    "bf16": "lfm3-vl-2b",
+}
+RAW_SEQS = (8, 32, 64, 128, 256, 512)
 # tag -> (model, arch, the card classes that hold its dtypes)
 ROTATE = {"int8": True, "rotate": 16}
 BOTH, AMPERE = ("3090", "2080"), ("3090",)
@@ -108,6 +117,22 @@ def box_5090() -> list[Arm]:
     for name, model in STOCK_5090.items():
         arms.append(Arm(f"5090_s_{name}", "5090", "vllm", model))
         arms.append(Arm(f"5090_s_http_{name}", "5090", "vllm_serve", model))
+    for name, model in STOCK_LFM3.items():
+        arms.append(Arm(f"5090_s_lfm3_{name}", "5090", "vllm", model, kohaku=True))
+        arms.append(Arm(f"5090_s_http_lfm3_{name}", "5090", "vllm_serve", model, kohaku=True))
+    model, env = KOHAKU_5090["lfm3"]
+    for seqs in RAW_SEQS:
+        kw = {"seqs": seqs, "kohaku": True}
+        for name in ("fp8", "mxfp8"):
+            tag = f"5090_raw_s_lfm3_{name}_n{seqs}"
+            arms.append(Arm(tag, "5090", "vllm_raw", STOCK_LFM3[name], **kw))
+        arms.append(Arm(f"5090_raw_k_lfm3_n{seqs}", "5090", "vllm_raw", model, env=env, **kw))
+        tag = f"5090_wall_s_lfm3_fp8_n{seqs}"
+        arms.append(Arm(tag, "5090", "vllm_wall", STOCK_LFM3["fp8"], **kw))
+    engine = {"async_scheduling": True}
+    tag = "5090_wall_async_s_lfm3_fp8_n512"
+    arm = Arm(tag, "5090", "vllm_wall", STOCK_LFM3["fp8"], engine=engine, seqs=512, kohaku=True)
+    arms.append(arm)
     for prefill in ("flashinfer", "fused"):
         for name in ("q4", "q27"):
             model, arch = TOKENOMOS_5090[name]

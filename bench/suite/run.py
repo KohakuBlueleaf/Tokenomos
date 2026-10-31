@@ -28,6 +28,7 @@ PY = sys.executable
 HERE = Path(__file__).parent
 CONFIG = Path(os.environ.get("TOKENOMOS_BOXES", HERE / "boxes.json"))
 BUSY_MIB = 300
+INLINE = {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"}
 WAIT_IDLE_S = 900
 
 
@@ -190,10 +191,39 @@ def vllm_env(arm: Arm, box: Box, env: dict) -> dict:
     return {**env, "VLLM_PLUGINS": ""}
 
 
+def vllm_raw(arm: Arm, model: str, env: dict, log: Path) -> int:
+    """Decode under nsys, the step accounting of its capture, then prefill."""
+    out = ROOT / "reports" / f"vllm_raw_{arm.tag}.json"
+    out.unlink(missing_ok=True)
+    capture = ROOT / "reports" / "nsys" / arm.tag
+    capture.parent.mkdir(exist_ok=True)
+    script = [PY, "bench/suite/vllm_raw.py", "--model", model, "--seqs", str(arm.seqs)]
+    script += ["--out", str(out), "--mode"]
+    nsys = ["nsys", "profile", "--capture-range=cudaProfilerApi", "--capture-range-end=none"]
+    nsys += ["--cuda-graph-trace=node", "-f", "true", "-o", str(capture)]
+    rep, db = f"{capture}.nsys-rep", f"{capture}.sqlite"
+    steps = [PY, "bench/profile/nsys_steps.py", db, "256", "_gumbel_sample_kernel"]
+    for cmd in (
+        [*nsys, *script, "decode"],
+        ["nsys", "export", "--type", "sqlite", "-f", "true", "-o", db, rep],
+        steps,
+        [*script, "prefill"],
+    ):
+        code = call(cmd, env, log, arm.limit)
+        if code:
+            return code
+    table = json.loads(capture.with_suffix(".steps.json").read_text("utf-8"))
+    data = json.loads(out.read_text("utf-8"))
+    data |= {k: table[k] for k in ("span_ms", "busy_ms", "idle_ms")}
+    data["decode_tok_s"] = round(arm.seqs / table["span_ms"] * 1e3, 1)
+    out.write_text(json.dumps(data, indent=1), "utf-8")
+    return 0
+
+
 def execute(arm: Arm, box: Box, card: int) -> dict:
     log = box.out / f"{arm.tag}.log"
     env = {**box.env, "CUDA_VISIBLE_DEVICES": str(card)}
-    env.update(arm.env if arm.kind not in ("vllm", "vllm_serve") else {})
+    env.update(arm.env if not arm.kind.startswith("vllm") else {})
     model = box.model(arm.model) if arm.model else ""
     arch, engine = json.dumps(arm.arch), json.dumps(arm.engine)
     t0 = time.time()
@@ -265,6 +295,19 @@ def execute(arm: Arm, box: Box, card: int) -> dict:
             "--trust-remote-code",
         ]
         code = http(arm, box, vllm_env(arm, box, env), log, common, card)
+    elif arm.kind == "vllm_raw":
+        prefix = "vllm_raw"
+        code = vllm_raw(arm, model, {**vllm_env(arm, box, env), **INLINE}, log)
+        clear_card(card)
+    elif arm.kind == "vllm_wall":
+        prefix = "vllm_raw"
+        out = ROOT / "reports" / f"vllm_raw_{arm.tag}.json"
+        out.unlink(missing_ok=True)
+        script = [PY, "bench/suite/vllm_raw.py", "--model", model, "--seqs", str(arm.seqs)]
+        script += ["--out", str(out), "--engine-kw", engine, "--mode"]
+        for mode in ("decode", "prefill"):
+            code = code or call([*script, mode], vllm_env(arm, box, env), log, arm.limit)
+            clear_card(card)
     elif arm.kind == "gbc":
         cmd = ["bash", box.gbc, str(card), arm.tag, arm.model, arm.arch["json"], "1200"]
         code = call(cmd, {**env, "LIMIT": "1500", "GBC_MAX_JOBS": "192"}, log, arm.limit)
