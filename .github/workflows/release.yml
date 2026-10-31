@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# The only workflow that uploads tokenomos, so PyPI needs one trusted publisher: this file
+# (release.yml), environment `pypi`.
+jobs:
+  # A tag that disagrees with Cargo.toml is a mis-cut release: stop before anything is uploaded,
+  # since a PyPI filename cannot be reused
+  version:
+    name: Tag matches the version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
+          test "${GITHUB_REF_NAME#v}" = "${version}" \
+            || { echo "tag ${GITHUB_REF_NAME} != Cargo.toml ${version}"; exit 1; }
+
+  # abi3: one wheel per platform
+  build-wheels:
+    name: Wheel for ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, manylinux: '2_28' }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, manylinux: '' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --out dist
+      - name: Test the wheel in a clean venv
+        run: |
+          python -m venv .venv-wheel
+          if [ "${RUNNER_OS}" = "Windows" ]; then . .venv-wheel/Scripts/activate; else . .venv-wheel/bin/activate; fi
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install dist/*.whl
+          # away from src/, so the import is the installed wheel
+          cd dist && python -c "from tokenomos._rs import grammar; import tokenomos; print(tokenomos.LLM)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  build-sdist:
+    name: Build the sdist
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build
+        run: |
+          pip install maturin twine
+          maturin sdist --out dist
+          twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tokenomos
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List artifacts
+        run: ls -lh dist/
+      - name: Upload to the GitHub release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*
+          fail_on_unmatched_files: false
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          verbose: true
