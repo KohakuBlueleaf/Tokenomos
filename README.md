@@ -14,7 +14,7 @@ the finish test and compaction of the row list are kernels inside one CUDA graph
 queues the next step, then reads the event of the step before, so it is always one step behind
 and the GPU always has work.
 
-![Decode rate by sequence count against stock vLLM on two models, and GPU idle per step: 23.21 ms for stock vLLM at 512 rows, 0.23 ms for Tokenomos](docs/assets/decode.jpg)
+![Decode rate by sequence count on seven models for Tokenomos, KohakuvLLM and stock vLLM, and GPU idle per step on LFM3-VL 2B MXFP8: 23.33 ms for stock vLLM at 512 rows, 0.23 ms for Tokenomos](docs/assets/decode.jpg)
 
 **Contents:** [Highlights](#highlights) · [Install](#install) · [Quick start](#quick-start) ·
 [How it works](#how-it-works) · [Models and cards](#models-and-cards) · [Knobs](#knobs) ·
@@ -27,8 +27,8 @@ and the GPU always has work.
   LFM3-VL 2B 130 images/s against 47, Qwen3.5 4B 65 against 24, Qwen3.8 27B 18 against 4; over HTTP
   135 against 42, 62 against 22, 19 against 4. Gemma 4 12B and 31B, where decode binds the card, sit
   at 0.95–1.1x stock ([measured](#measured)).
-- **The GPU does not wait.** LFM3 at 512 sequences: GPU idle 0.23 ms per step against stock vLLM's
-  23.21, for 79,030 decode tok/s against 16,557. Caption runs reach 89–98% of the sum of each
+- **The GPU does not wait.** LFM3 MXFP8 at 512 sequences: GPU idle 0.23 ms per step against stock
+  vLLM's 23.33, for 79,030 decode tok/s against 14,881. Caption runs reach 89–98% of the sum of each
   stage's own ceiling on the card.
 - **The frontend is not a limit.** Prep pool 935–1313 rows/s at 16 workers, 1389 HTTP requests/s,
   no starved step in 14 runs. Over HTTP a caption rate stays within 6% of in-process on every model.
@@ -255,7 +255,7 @@ only; vLLM is 0.32.0, stock means no plugin, and
 
 ### Root captions on an RTX 5090
 
-![Images per second per model, in process and HTTP: Tokenomos, KohakuvLLM and stock vLLM](docs/assets/captions.jpg)
+![Images per second per model, in process and over HTTP, for Tokenomos, KohakuvLLM and stock vLLM](docs/assets/captions.jpg)
 
 1024 GBC root-caption rows on every engine and call path: greedy, thinking off, `max_tokens` 1024,
 `max_len` 4096, images up to 1024² pixels in area, median 0.08 Mpx. Images per second over the whole
@@ -283,6 +283,14 @@ costs 800 MiB a slot, so Tokenomos holds nine slots, and decode is two thirds of
 31B set `kv_reserve` to 4 and 2 GiB so the rings get the memory.
 
 ### Decode and prefill on an RTX 5090
+
+Decode is the figure at the top of this page. Prefill per model, and a decode step's time on LFM3-VL
+2B MXFP8 by nsys. LFM3 in both figures runs MXFP8 on every engine, vLLM with its engine in one
+process.
+
+![Prefill rate by sequence count on seven models for Tokenomos, KohakuvLLM and stock vLLM](docs/assets/prefill.jpg)
+
+![LFM3-VL 2B MXFP8: GPU busy and idle per step for Tokenomos, KohakuvLLM and stock vLLM, and Tokenomos's host time per step](docs/assets/step.jpg)
 
 Random prompts, greedy, EOS ignored. Decode: S × 64-token prompts, 512 generated. Prefill: S ×
 2048-token prompts, 1 generated. LFM3-VL 2B, Tokenomos on MXFP8, stock vLLM on FP8 with LFM3's model
@@ -312,6 +320,8 @@ on Qwen, stock on Gemma 4 ([Qwen](docs/measurements/qwen35.md),
 
 ### Where a caption run spends the card
 
+![Share of a caption run on vision, prefill and decode per model, and the run's rate against the sum of each stage's ceiling](docs/assets/spend.jpg)
+
 Seconds on the card over 1024 rows, shares of the wall, and the run against each stage's own ceiling
 ([bottlenecks](docs/measurements/bottlenecks.md)):
 
@@ -330,6 +340,8 @@ workers. One runaway reply, alone in the smallest bucket until `max_tokens`, cos
 difference between the 155.7 here and the 130.30 above.
 
 ### The full GBC graph
+
+![Whole-graph images per second per card and VLM, and the rate by resident jobs on an RTX 5090](docs/assets/gbc.jpg)
 
 `mid.py` and `sam3.py` in [KohakuGBC](https://github.com/KohakuBlueleaf/KohakuGBC), the VLM in an
 engine host behind a connector, SAM 3 and EmbeddingGemma on the same card. COCO val2017: long side
@@ -357,6 +369,8 @@ it again 62 s later, 95 VLM requests retry and 100 of 100 images finish.
 
 ### RTX 3090 and RTX 2080 Ti
 
+![Decode, prefill, host time and caption rate per model and work format on an RTX 3090 and an RTX 2080 Ti](docs/assets/turing.jpg)
+
 Linux, bf16 checkpoints converted at load, `gdn_prefill` `fused`. Decode: S × 64-token prompts, 512
 generated, S 128 on the 3090 and 64 on the 2080 Ti. Prefill: S × 2048-token prompts. Host: ms of the
 loop's own work per step. Captions: the same 1024 rows in process. 4B carries the int8 GDN state on
@@ -382,6 +396,8 @@ W8A8, W8A8 rotates by 16 ([Turing and Ampere](docs/measurements/turing-ampere.md
 Logit gaps over 1,024 tokens of real text against a float32 Hugging Face forward, decode at 128 rows
 on a 3090:
 
+![Mean logit gap, argmax agreement, decode rate and memory per model and work format](docs/assets/precision.jpg)
+
 | Model | Work | tok/s | GiB | Argmax | Gap mean |
 |---|---|---|---|---|---|
 | LFM3-VL 2B | bf16 | 11,893 | 5.71 | 0.98730 | 0.016196 |
@@ -390,6 +406,8 @@ on a 3090:
 | Qwen3.5 4B | bf16 | 3,456 | 20.40 | 0.98535 | 0.013722 |
 | Qwen3.5 4B | fp16 | 3,481 | 19.84 | 0.99609 | 0.001762 |
 | Qwen3.5 4B | `fp32`, TileLang | 1,862 | 19.98 | 0.99805 | 0.000508 |
+
+![GEMM rates on the RTX 3090 and 2080 Ti, and the GDN chunked prefill per card on three kernels](docs/assets/kernels.jpg)
 
 GEMMs at M 256, N 65536, K 2048, in trillion multiply-accumulates per second:
 
@@ -410,6 +428,8 @@ tokens, µs a call; FlashInfer needs sm90. On a 5090 a whole prefill holds level
 | RTX 2080 Ti | fp16 | 28,754 | | 29,000 | 42,001 | | 43,857 |
 
 ### Windows on an RTX 4090
+
+![Decode by sequence count, prefill, host time and caption rate per model and format on an RTX 4090](docs/assets/windows.jpg)
 
 Windows 11, no FlashInfer, every run capped at 19 GiB of the card's 24, `kv_leave` 1.5 GiB,
 `kv_reserve` 5 GiB, `head` bf16, `gdn_prefill` `fused`. Decode: S × 64-token prompts, 512 generated.
