@@ -5,12 +5,39 @@ Baseline: vLLM 0.32.0 + KohakuvLLM (torch 2.13.0+cu130, flashinfer 0.7.0.post1, 
 `max_num_seqs` 256, `max_num_batched_tokens` 8192, prefix caching off. Every number below comes
 from a script in `bench/` whose report lands in `reports/`.
 
-## Text: decode and prefill (1 GPU)
+## Stock vLLM
+
+vLLM has no LFM3. `bench/suite/run.py --box 5090 --only 5090_wall,5090_raw` runs vLLM 0.32.0 with
+LFM3's model definition registered as an architecture and nothing else of the plugin: every linear,
+attention and sampler kernel is vLLM's own, and the width-7 conv is the plugin's, since vLLM's
+`causal_conv1d` kernels stop at width 5. S x 64-token prompts, 512 generated; S x 2048-token
+prompts, 1 generated. `async_scheduling=True` changes nothing: 16,734 tok/s at 512.
+
+Multiprocess engine, FP8 checkpoint, tok/s over the whole call, with nsys step ms wall / busy / idle
+from an in-process engine (`bench/suite/vllm_raw.py`, `bench/profile/nsys_steps.py`):
+
+| seqs | prefill tok/s | decode tok/s | decode tok/s, in process | step ms |
+|---|---|---|---|---|
+| 8 | 111,850 | 3,194 | 2,176 | 3.58 / 2.31 / 1.27 |
+| 32 | 119,640 | 8,356 | 6,045 | 5.10 / 2.60 / 2.50 |
+| 64 | 117,967 | 11,198 | 9,004 | 6.96 / 2.93 / 4.03 |
+| 128 | 118,148 | 13,577 | 11,468 | 10.75 / 3.83 / 6.92 |
+| 256 | 124,554 | 15,813 | 13,178 | 18.50 / 6.12 / 12.38 |
+| 512 | 120,229 | 16,557 | 14,665 | 33.98 / 10.77 / 23.21 |
+
+The in-process engine on other setups, tok/s at 512 and step ms: MXFP8 checkpoint 14,881, 33.33 /
+10.00 / 23.33; with `KOHAKU_MXFP8=1` 14,906, 33.33 / 9.93 / 23.40. Prefill at 512: 108,797 and
+121,040.
+
+## Text: decode and prefill against KohakuvLLM (1 GPU)
 
 Random prompts, greedy, EOS ignored, 8192 tokens per prefill forward. Decode: S × 64-token
 prompt, 512 generated. Prefill: S × 2048-token prompts, 1 generated. Step ms: wall / GPU busy /
 GPU idle per decode step (nsys). Host CPU: Tokenomos's host time per step. (`bench/decode.py`,
 `bench/profile/nsys_steps.py`)
+
+The vLLM columns here come from an earlier KohakuvLLM configuration that was not recorded. The
+current `KOHAKU_MXFP8=1` arm above does not reproduce them: 14,906 tok/s at 512 against 22,448.
 
 | seqs | prefill tok/s vLLM | prefill tok/s Tokenomos | decode tok/s vLLM | decode tok/s Tokenomos | step ms vLLM | step ms Tokenomos | host ms Tokenomos |
 |---|---|---|---|---|---|---|---|

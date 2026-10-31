@@ -17,7 +17,7 @@ flight; `bench/suite/run.py --box 5090` runs them all and writes `reports/suite/
 
 | Model | Tokenomos in process | Tokenomos HTTP | KohakuvLLM in process | KohakuvLLM HTTP | Stock vLLM in process | Stock vLLM HTTP |
 |---|---|---|---|---|---|---|
-| LFM3-VL 2B MXFP8 | 130.30 | 135.05 | 26.23 | 31.73 | does not run | does not run |
+| LFM3-VL 2B MXFP8 | 130.30 | 135.05 | 8.08 (loops) | 34.37 | 46.89 (FP8) | 42.44 (FP8) |
 | Qwen3.5 4B MXFP8 | 64.91 | 62.17 | 22.34 | 20.20 | 23.96 (FP8) | 21.79 (FP8) |
 | Gemma 4 E4B NVFP4 | 58.93 | 55.57 | not run | not run | 21.30 | 20.04 |
 | Qwen3.5 9B NVFP4 | 48.99 | 46.43 | 21.80 | 20.82 | 21.87 | 18.09 |
@@ -26,9 +26,14 @@ flight; `bench/suite/run.py --box 5090` runs them all and writes `reports/suite/
 | Gemma 4 31B NVFP4 | 3.60 | 3.61 | not run | not run | 3.25 | 3.79 |
 
 12B and 31B set `kv_reserve` to 4 and 2 GiB: the automatic reserve leaves them 41 and 7 slots, 22.44
-and 3.22 img/s. LFM3's in-process row holds one runaway reply. KohakuvLLM's LFM3 in process applies
-the generation config's repetition penalty as `vllm serve` does; 29 of its replies reach
-`max_tokens`. Without the penalty it loops on 1012 replies.
+and 3.22 img/s. Tokenomos's LFM3 in-process row holds one runaway reply.
+
+vLLM has no LFM3: its rows register LFM3's model definition, with vLLM's own linear, attention and
+sampler kernels and the plugin's width-7 conv. In process and over HTTP per checkpoint: FP8 46.89 /
+42.44, NVFP4 36.98 / 7.88, MXFP8 27.75 / 32.07, bf16 33.86 / 8.10. NVFP4 and bf16 over HTTP loop on
+982 and 1005 replies. KohakuvLLM (`KOHAKU_MXFP8=1`) in process loops on 1014 replies; its HTTP row
+stops on all 1024. Both stock LFM3 and KohakuvLLM apply the generation config's repetition penalty
+as `vllm serve` does.
 
 ## Where the time goes (Tokenomos in process)
 
