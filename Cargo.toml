@@ -1,0 +1,23 @@
+[package]
+name = "tokenomos"
+version = "0.0.1"
+edition = "2021"
+description = "Rust core of Tokenomos (tokenomos._rs): the ports of its host-side parts"
+license = "Apache-2.0"
+
+[lib]
+name = "tokenomos_rs"
+path = "src/tokenomos-rust/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"], optional = true }
+serde_json = { version = "1", features = ["preserve_order"] }
+rustc-hash = "2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

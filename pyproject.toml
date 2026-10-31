@@ -1,0 +1,76 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tokenomos"
+dynamic = ["version"]
+description = "Local inference for small VLMs whose host work per step does not grow with the batch: the GPU is the only bottleneck"
+authors = [
+    { name = "Shih-Ying Yeh(KohakuBlueLeaf)", email = "apolloyeh0123@gmail.com" },
+]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.11",
+    "torchvision",
+    "triton>=3.5; sys_platform != 'win32'",
+    "triton-windows>=3.5; sys_platform == 'win32'",
+    "safetensors>=0.4",
+    "numpy>=2",
+    "tokenizers>=0.21",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[project.urls]
+Repository = "https://github.com/KohakuBlueleaf/Tokenomos"
+
+[project.optional-dependencies]
+# FlashInfer: b12x MXFP8 GEMMs and NVFP4 GEMMs; transformers: reference models in tests only
+gpu = ["flashinfer-python>=0.6; sys_platform != 'win32'"]
+# W8A8 on Ampere and Turing tensor cores
+tensorcore = ["tilelang>=0.1.15"]
+dev = ["maturin>=1.7,<2", "pytest>=8", "ruff", "black", "transformers>=5"]
+
+[tool.maturin]
+python-source = "src"
+module-name = "tokenomos._rs"
+features = ["python"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+# vendored flash-linear-attention kernels, kept as upstream wrote them
+extend-exclude = "src/tokenomos/kernels/gdn/fla/"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "bench"]
+extend-exclude = ["src/tokenomos/kernels/gdn/fla"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "BLE", "UP", "SIM", "PERF", "RUF100", "PLC0415"]
+ignore = ["B905", "PERF203"]
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA GPU",
+    "bf16: needs bf16 in PTX (sm80)",
+    "fp8: needs Triton's fp8e4nv (sm89)",
+    "sm100: needs cuBLAS MXFP8 or the NVFP4 kernels (sm100)",
+    "model: needs a model checkpoint (TOKENOMOS_MODELS points at the folder)",
+]
