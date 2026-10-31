@@ -269,7 +269,7 @@ def main() -> int:
     )
     text(ax, x4 + 0.2, 1.75, "GPU idle per step, 512 rows", s, bold=True)
     text(ax, x4 + 0.2, 1.33, "0.23 ms", s + 6, colour=VIOLET, bold=True)
-    text(ax, x4 + 2.05, 1.26, "against stock vLLM's 23.21 ms", s - 1)
+    text(ax, x4 + 2.05, 1.26, "against stock vLLM's 23.33 ms", s - 1)
     text(ax, x4 + 0.2, 0.68, "LFM3-VL 2B, RTX 5090, by nsys", s - 2.5, colour=MUTED)
     arrow(ax, (x3 + w3, 6.4), (x4, 6.4), colour=INK)
 
