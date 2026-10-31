@@ -20,16 +20,15 @@ VIOLET, GOLD = "#8250df", "#bf8700"
 
 ROWS = [8, 32, 64, 128, 256, 512]
 LFM_OURS = [4129, 15648, 29257, 48726, 66298, 79030]
-LFM_VLLM = [2773, 7863, 10552, 17261, 20416, 22448]
+LFM_VLLM = [3194, 8356, 11198, 13577, 15813, 16557]
 LFM_IDLE_OURS = [0.09, 0.08, 0.09, 0.13, 0.16, 0.23]
-LFM_IDLE_VLLM = [0.28, 1.39, 3.37, 4.18, 7.54, 14.37]
+LFM_IDLE_VLLM = [1.27, 2.50, 4.03, 6.92, 12.38, 23.21]
 E4B_OURS = [2136, 8020, 13837, 20346, 25544, 29524]
 E4B_VLLM = [1832, 6432, 10900, 15266, 17462, 17213]
 
-# model, then in process and HTTP for Tokenomos, KohakuvLLM, stock vLLM; None: does not run or not
-# run
+# model, then in process and HTTP for Tokenomos, KohakuvLLM, stock vLLM; None: not run
 CAPTIONS = [
-    ("LFM3-VL 2B", 130.30, 135.05, 26.23, 31.73, None, None),
+    ("LFM3-VL 2B", 130.30, 135.05, 8.08, 34.37, 46.89, 42.44),
     ("Qwen3.5 4B", 64.91, 62.17, 22.34, 20.20, 23.96, 21.79),
     ("Gemma 4 E4B", 58.93, 55.57, None, None, 21.30, 20.04),
     ("Qwen3.5 9B", 48.99, 46.43, 21.80, 20.82, 21.87, 18.09),
@@ -61,7 +60,7 @@ def label(ax, x, y, s, colour) -> None:
     ax.plot([x], [y], "o", color=colour, ms=8, mec=PAPER, mew=1.5, zorder=4)
 
 
-def lines(ax, ours, theirs, title, name="vLLM") -> None:
+def lines(ax, ours, theirs, title, name="stock vLLM") -> None:
     ax.plot(ROWS, ours, color=OURS, lw=2.4, marker="o", ms=6, mec=PAPER)
     ax.plot(ROWS, theirs, color=STOCK, lw=2.4, marker="o", ms=6, mec=PAPER)
     label(ax, ROWS[-1], ours[-1], f"Tokenomos {ours[-1]:,}", OURS)
@@ -78,13 +77,13 @@ def lines(ax, ours, theirs, title, name="vLLM") -> None:
 
 def decode(out: Path) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.2), facecolor=PAPER)
-    lines(axes[0], LFM_OURS, LFM_VLLM, "LFM3-VL 2B MXFP8: decode tok/s", "KohakuvLLM")
+    lines(axes[0], LFM_OURS, LFM_VLLM, "LFM3-VL 2B, ours MXFP8, stock FP8: decode tok/s")
     lines(axes[1], E4B_OURS, E4B_VLLM, "Gemma 4 E4B NVFP4: decode tok/s")
     ax = axes[2]
     ax.plot(ROWS, LFM_IDLE_OURS, color=OURS, lw=2.4, marker="o", ms=6, mec=PAPER)
     ax.plot(ROWS, LFM_IDLE_VLLM, color=STOCK, lw=2.4, marker="o", ms=6, mec=PAPER)
     label(ax, ROWS[-1], LFM_IDLE_OURS[-1], f"Tokenomos {LFM_IDLE_OURS[-1]} ms", OURS)
-    label(ax, ROWS[-1], LFM_IDLE_VLLM[-1], f"KohakuvLLM {LFM_IDLE_VLLM[-1]} ms", STOCK)
+    label(ax, ROWS[-1], LFM_IDLE_VLLM[-1], f"stock vLLM {LFM_IDLE_VLLM[-1]} ms", STOCK)
     ax.set_xscale("log", base=2)
     ax.set_xticks(ROWS, [str(r) for r in ROWS])
     ax.minorticks_off()
@@ -99,12 +98,15 @@ def decode(out: Path) -> None:
     fig.savefig(out / "decode.jpg", dpi=150, facecolor=PAPER, pil_kwargs={"quality": 90})
 
 
+LOOPS = {("LFM3-VL 2B", "KohakuvLLM")}  # in-process replies run to max_tokens
+
+
 def captions(out: Path) -> None:
     n = len(CAPTIONS)
     fig, ax = plt.subplots(figsize=(13, 0.98 * n + 1.4), facecolor=PAPER)
     engines = ((OURS, 0.27, "Tokenomos"), (KOHAKU, 0.0, "KohakuvLLM"), (STOCK, -0.27, "stock vLLM"))
-    for i, (_, *rates) in enumerate(CAPTIONS):
-        for j, (colour, lane, _) in enumerate(engines):
+    for i, (model, *rates) in enumerate(CAPTIONS):
+        for j, (colour, lane, engine) in enumerate(engines):
             inproc, http = rates[2 * j : 2 * j + 2]
             y = n - 1 - i + lane
             if inproc is None:
@@ -113,7 +115,7 @@ def captions(out: Path) -> None:
             ax.plot([http], [y], "o", color=colour, ms=8, mec=PAPER, mew=1, zorder=3)
             ax.plot([inproc], [y], "s", mfc="none", mec=colour, ms=9, mew=1.8, zorder=4)
             ax.annotate(
-                f"{inproc:.2f} / {http:.2f}",
+                f"{inproc:.2f}{' (loops)' if (model, engine) in LOOPS else ''} / {http:.2f}",
                 (max(inproc, http), y),
                 xytext=(9, 0),
                 textcoords="offset points",

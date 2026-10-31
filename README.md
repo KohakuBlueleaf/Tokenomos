@@ -14,7 +14,7 @@ the finish test and compaction of the row list are kernels inside one CUDA graph
 queues the next step, then reads the event of the step before, so it is always one step behind
 and the GPU always has work.
 
-![Decode rate by sequence count against vLLM on two models, and GPU idle per step: 14.37 ms for vLLM at 512 rows, 0.23 ms for Tokenomos](docs/assets/decode.jpg)
+![Decode rate by sequence count against stock vLLM on two models, and GPU idle per step: 23.21 ms for stock vLLM at 512 rows, 0.23 ms for Tokenomos](docs/assets/decode.jpg)
 
 **Contents:** [Highlights](#highlights) · [Install](#install) · [Quick start](#quick-start) ·
 [How it works](#how-it-works) · [Models and cards](#models-and-cards) · [Knobs](#knobs) ·
@@ -23,12 +23,12 @@ and the GPU always has work.
 
 ## Highlights
 
-- **2.2–5x vLLM on captions, on the same RTX 5090, on the same call path.** In process LFM3-VL 2B
-  130 images/s against KohakuvLLM's 26, Qwen3.5 4B 65 against stock vLLM's 24, Qwen3.8 27B 18
-  against 5; over HTTP 135 against 32, 62 against 22, 19 against 5. Gemma 4 12B and 31B, where
-  decode binds the card, sit at 0.95–1.1x stock ([measured](#measured)).
-- **The GPU does not wait.** LFM3 at 512 sequences: GPU idle 0.23 ms per step against vLLM's
-  14.37, for 79,030 decode tok/s against 22,448. Caption runs reach 89–98% of the sum of each
+- **2.2–4.8x stock vLLM on captions, on the same RTX 5090, on the same call path.** In process
+  LFM3-VL 2B 130 images/s against 47, Qwen3.5 4B 65 against 24, Qwen3.8 27B 18 against 4; over HTTP
+  135 against 42, 62 against 22, 19 against 4. Gemma 4 12B and 31B, where decode binds the card, sit
+  at 0.95–1.1x stock ([measured](#measured)).
+- **The GPU does not wait.** LFM3 at 512 sequences: GPU idle 0.23 ms per step against stock vLLM's
+  23.21, for 79,030 decode tok/s against 16,557. Caption runs reach 89–98% of the sum of each
   stage's own ceiling on the card.
 - **The frontend is not a limit.** Prep pool 935–1313 rows/s at 16 workers, 1389 HTTP requests/s,
   no starved step in 14 runs. Over HTTP a caption rate stays within 6% of in-process on every model.
@@ -265,13 +265,18 @@ card.
 
 | Model | Tokenomos in process | Tokenomos HTTP | KohakuvLLM in process | KohakuvLLM HTTP | Stock vLLM in process | Stock vLLM HTTP |
 |---|---|---|---|---|---|---|
-| LFM3-VL 2B MXFP8 | 130.30 | **135.05** | 26.23 | 31.73 | does not run | does not run |
+| LFM3-VL 2B MXFP8 | 130.30 | **135.05** | 8.08 (loops) | 34.37 | 46.89 (FP8) | 42.44 (FP8) |
 | Qwen3.5 4B MXFP8 | **64.91** | 62.17 | 22.34 | 20.20 | 23.96 (FP8) | 21.79 (FP8) |
 | Gemma 4 E4B NVFP4 | **58.93** | 55.57 | | | 21.30 | 20.04 |
 | Qwen3.5 9B NVFP4 | **48.99** | 46.43 | 21.80 | 20.82 | 21.87 | 18.09 |
 | Gemma 4 12B NVFP4 | **22.88** | 22.70 | | | 21.06 | 20.71 |
 | Qwen3.8 27B NVFP4 | 18.40 | **18.85** | 4.94 | 4.88 | 3.85 | 4.26 |
 | Gemma 4 31B NVFP4 | 3.60 | 3.61 | | | 3.25 | **3.79** |
+
+vLLM has no LFM3, so its rows run LFM3's model definition as a registered architecture: every linear,
+attention and sampler kernel is vLLM's own, and the conv is ours, since vLLM's kernels stop at width
+5. FP8 is stock's best LFM3 checkpoint: MXFP8 gives 27.75 / 32.07, NVFP4 36.98, bf16 33.86 in
+process. KohakuvLLM in process loops on 1014 of its replies, and that row is not a throughput.
 
 Gemma 4 runs on stock vLLM alone. 31B over HTTP is the one cell stock leads, by 5%: a sliding ring
 costs 800 MiB a slot, so Tokenomos holds nine slots, and decode is two thirds of its run. 12B and
@@ -280,17 +285,20 @@ costs 800 MiB a slot, so Tokenomos holds nine slots, and decode is two thirds of
 ### Decode and prefill on an RTX 5090
 
 Random prompts, greedy, EOS ignored. Decode: S × 64-token prompts, 512 generated. Prefill: S ×
-2048-token prompts, 1 generated. LFM3-VL 2B MXFP8, one GPU; step ms is wall / GPU busy / GPU idle
-by nsys ([LFM3](docs/measurements/lfm3-vl-2b.md)):
+2048-token prompts, 1 generated. LFM3-VL 2B, Tokenomos on MXFP8, stock vLLM on FP8 with LFM3's model
+definition registered, one GPU; both rates over the whole call, stock in its normal multiprocess
+engine. Step ms is wall / GPU busy / GPU idle by nsys, stock's with the engine in one process, where
+it decodes 15,070 tok/s at 512 ([LFM3](docs/measurements/lfm3-vl-2b.md)):
 
-| Seqs | Prefill tok/s vLLM | Prefill tok/s Tokenomos | Decode tok/s vLLM | Decode tok/s Tokenomos | Step ms vLLM | Step ms Tokenomos | Host ms Tokenomos |
+| Seqs | Prefill tok/s stock | Prefill tok/s Tokenomos | Decode tok/s stock | Decode tok/s Tokenomos | Step ms stock | Step ms Tokenomos | Host ms Tokenomos |
 |---|---|---|---|---|---|---|---|
-| 8 | 97,594 | 127,946 | 2,773 | 4,129 | 2.88 / 2.60 / 0.28 | 1.94 / 1.85 / 0.09 | 0.12 |
-| 64 | 124,532 | 155,772 | 10,552 | 29,257 | 6.07 / 2.70 / 3.37 | 2.19 / 2.10 / 0.09 | 0.13 |
-| 256 | 136,727 | 155,660 | 20,416 | 66,298 | 12.54 / 5.00 / 7.54 | 3.86 / 3.71 / 0.16 | 0.26 |
-| 512 | 137,803 | 155,061 | 22,448 | 79,030 | 22.81 / 8.45 / 14.37 | 6.48 / 6.25 / 0.23 | 0.41 |
+| 8 | 111,850 | 127,946 | 3,194 | 4,129 | 3.58 / 2.31 / 1.27 | 1.94 / 1.85 / 0.09 | 0.12 |
+| 64 | 117,967 | 155,772 | 11,198 | 29,257 | 6.96 / 2.93 / 4.03 | 2.19 / 2.10 / 0.09 | 0.13 |
+| 256 | 124,554 | 155,660 | 15,813 | 66,298 | 18.50 / 6.12 / 12.38 | 3.86 / 3.71 / 0.16 | 0.26 |
+| 512 | 120,229 | 155,061 | 16,557 | 79,030 | 33.98 / 10.77 / 23.21 | 6.48 / 6.25 / 0.23 | 0.41 |
 
-Peak decode and best prefill on the others ([Qwen](docs/measurements/qwen35.md),
+Peak decode and best prefill on the others; the vLLM columns are KohakuvLLM with the int8 GDN state
+on Qwen, stock on Gemma 4 ([Qwen](docs/measurements/qwen35.md),
 [Gemma 4](docs/measurements/gemma4.md)):
 
 | Model | Decode tok/s Tokenomos | Decode tok/s vLLM | Prefill tok/s Tokenomos | Prefill tok/s vLLM |
