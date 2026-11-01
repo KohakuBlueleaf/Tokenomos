@@ -3,8 +3,9 @@ the tests and the GDN tile sweep open a class, everything else runs after them.
 
 ``5090``: the 3 x 2 caption table (Tokenomos, KohakuvLLM, stock vLLM; in process and HTTP, 4096
 ``max_len``, 1024 in flight), FlashInfer's GDN prefill against ``fused``. ``p8``: decode, prefill
-and captions per work dtype and W8A8 on the RTX 3090 and 2080 Ti, one full GBC graph. ``win``: the
-same on the RTX 4090, FP8 included, under a 19 GiB cap.
+and captions per work dtype and W8A8 on the RTX 3090 and 2080 Ti, one full GBC graph. ``v100``: the
+fp16 and fp32 arms on the V100 and PG503. ``win``: the same on the RTX 4090, FP8 included, under a
+19 GiB cap.
 """
 
 from dataclasses import dataclass, field
@@ -84,6 +85,9 @@ P8 = {
     "e4b_fp16": ("gemma4-e4b-it", {"work": "fp16"}, BOTH),
     "e4b_w8a8": ("gemma4-e4b-it", ROTATE, BOTH),
 }
+# Volta has no int8 tensor cores: fp16 work and fp32 over fp16 weights, no W8A8; FLA is Triton dots
+VOLTA = ("lfm_fp16", "lfm_fp32_cublas", "lfm_fp32_tilelang")
+VOLTA += ("q4_fp16", "q4_fp32_cublas", "q4_fp32_tilelang")
 LEAVE = {"kv_leave": 3 << 29, "kv_reserve": 5 << 30}
 Q4 = "Qwen--Qwen3.5-4B"
 Q9 = "RedHatAI--Qwen3.5-9B-FP8-dynamic"
@@ -158,6 +162,18 @@ def box_p8() -> list[Arm]:
     return arms
 
 
+def box_v100() -> list[Arm]:
+    arms = []
+    for card in ("v100", "pg503"):
+        arms += [Arm(f"{card}_tests", card, "tests"), Arm(f"{card}_tune", card, "tune")]
+        for name in VOLTA:
+            model, arch, _ = P8[name]
+            tag = f"{card}_{name}"
+            arms.append(Arm(tag, card, "decode", model, arch, seqs=64, prefill_seqs=64))
+            arms.append(Arm(f"{tag}_cap", card, "caption", model, arch, CAPTION, limit=3600))
+    return arms
+
+
 def box_win() -> list[Arm]:
     arms = [Arm("4090_tests", "4090", "tests", limit=3600), Arm("4090_tune", "4090", "tune")]
     for name, (model, arch) in WIN.items():
@@ -171,4 +187,4 @@ def box_win() -> list[Arm]:
     return arms
 
 
-BOXES = {"5090": box_5090, "p8": box_p8, "win": box_win}
+BOXES = {"5090": box_5090, "p8": box_p8, "v100": box_v100, "win": box_win}
