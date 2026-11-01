@@ -12,10 +12,12 @@ import random
 import pytest
 import torch
 
+from tokenomos.core import floats
 from tokenomos.kernels.attention import paged
 
 pytestmark = pytest.mark.gpu
 DEV = "cuda"
+WORK = floats.DTYPES[floats.default(DEV)] if torch.cuda.is_available() else torch.bfloat16
 
 
 def reference(q, k, v, ctx, window, softcap, scale):
@@ -42,7 +44,7 @@ class Case:
     def __init__(self, lens, hkv, dim, ring, window, page=16, same=False):
         self.lens, self.ring, self.same = lens, ring, same
         S = len(lens)
-        self.k = [torch.randn(c + n, hkv, dim, device=DEV, dtype=torch.bfloat16) for c, n in lens]
+        self.k = [torch.randn(c + n, hkv, dim, device=DEV, dtype=WORK) for c, n in lens]
         self.v = self.k if same else [torch.randn_like(x) for x in self.k]
         slots = list(range(1, S + 1))
         random.shuffle(slots)
@@ -51,7 +53,7 @@ class Case:
         nan = float("nan")
         if ring:
             self.R = window + 5
-            self.kc = torch.full((S + 1, self.R, hkv, dim), nan, device=DEV, dtype=torch.bfloat16)
+            self.kc = torch.full((S + 1, self.R, hkv, dim), nan, device=DEV, dtype=WORK)
             self.vc = self.kc if same else torch.full_like(self.kc, nan)
             self.table = None
             for (c, _), s, k, v in zip(lens, slots, self.k, self.v):
@@ -62,7 +64,7 @@ class Case:
             pages = list(range(1, sum(need) + 1))
             random.shuffle(pages)
             shape = (sum(need) + 1, page, hkv, dim)
-            self.kc = torch.full(shape, nan, device=DEV, dtype=torch.bfloat16)
+            self.kc = torch.full(shape, nan, device=DEV, dtype=WORK)
             self.vc = self.kc if same else torch.full_like(self.kc, nan)
             self.table = torch.zeros(S + 1, max(need), dtype=torch.int32, device=DEV)
             for (c, _), s, k, v, m in zip(lens, slots, self.k, self.v, need):
@@ -94,7 +96,7 @@ def test_decode(h, hkv, dim, mode):
     softcap = 30.0 if mode == "softcap" else None
     lens = [(c, 1) for c in (0, 1, 15, 16, 17, 100, 300, 64)]
     case = Case(lens, hkv, dim, mode == "ring", window or 37, same=mode == "same")
-    q = torch.randn(len(lens), h, dim, device=DEV, dtype=torch.bfloat16)
+    q = torch.randn(len(lens), h, dim, device=DEV, dtype=WORK)
     k, v = case.new(case.k), case.new(case.v)
     scale = dim**-0.5
     out = paged.decode(
@@ -129,6 +131,7 @@ def check_written(case):
 )
 def test_prefill_tiles_fit_shared_memory_and_dot(monkeypatch, dim, half, block):
     monkeypatch.setattr(paged, "_half_tiles", lambda: half)
+    monkeypatch.setattr(paged, "_on_volta", lambda: False)
     assert paged.prefill_block(dim) == (block, block)
 
 
@@ -143,7 +146,7 @@ def test_prefill_and_write(h, hkv, dim, mode):
     case = Case(lens, hkv, dim, mode == "ring", window or 50, same=mode == "same")
     k, v = case.new(case.k), case.new(case.v)
     T = k.shape[0]
-    q = torch.randn(T, h, dim, device=DEV, dtype=torch.bfloat16)
+    q = torch.randn(T, h, dim, device=DEV, dtype=WORK)
     cu_host = [0]
     for _, n in lens:
         cu_host.append(cu_host[-1] + n)
@@ -196,7 +199,7 @@ def test_reads_poisoned_rows_fail():
     random.seed(2)
     case = Case([(100, 1)], 8, 64, False, 37)
     case.kc[case.table[case.slot[0], 1], 3] = float("nan")
-    q = torch.randn(1, 32, 64, device=DEV, dtype=torch.bfloat16)
+    q = torch.randn(1, 32, 64, device=DEV, dtype=WORK)
     out = paged.decode(
         q,
         case.new(case.k),

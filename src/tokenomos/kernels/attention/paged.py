@@ -22,7 +22,17 @@ import torch
 import triton
 import triton.language as tl
 
-from tokenomos.core.floats import matmul, tl_dtype
+from tokenomos.core.floats import is_volta, matmul, tl_dtype
+
+try:
+    from tokenomos.kernels.attention import volta
+except ImportError:  # Volta's attention needs TileLang
+    volta = None
+
+
+@cache
+def _on_volta() -> bool:
+    return torch.cuda.is_available() and is_volta(torch.cuda.current_device())
 
 
 @cache
@@ -316,6 +326,8 @@ def decode(
 ):
     """``q`` [N, H, D], ``k`` / ``v`` [N, Hkv, D] (one new token per sequence; rows may be
     strided views), ``slot`` / ``ctx`` [N] -> [N, H, D]."""
+    if is_volta(q.device):
+        return volta.decode(q, k, v, kc, vc, slot, ctx, table, scale, window, softcap, ring, out)
     n, h, dim = q.shape
     hkv = k.shape[1]
     g = h // hkv
@@ -368,6 +380,8 @@ def tiles(cu_host: list[int], bm: int) -> tuple[list[int], list[int]]:
 
 def prefill_block(dim: int) -> tuple[int, int]:
     """(BM, BN): the tiles' shared memory is about ``(2 * BM + BN) * dim`` float32 values."""
+    if _on_volta():
+        return volta.prefill_block(dim)
     block = 64 if dim <= 128 else 32 if dim <= 256 else 16
     block = max(block >> _half_tiles(), 16)  # tl.dot needs K >= 16
     return block, block
@@ -396,6 +410,9 @@ def prefill(
     ``tile_seq`` / ``tile_q0`` from ``tiles`` -> [T, H, D]. ``causal`` False: every token of a
     sequence sees all of it (an image encoder's full attention). ``blocks`` (run id [T], run's
     last position [T]): bidirectional runs within the causal mask."""
+    if is_volta(q.device):
+        kw = dict(window=window, softcap=softcap, ring=ring, causal=causal, blocks=blocks)
+        return volta.prefill(q, k, v, kc, vc, cu, slot, ctx, table, tile_seq, tile_q0, scale, **kw)
     t, h, dim = q.shape
     hkv = k.shape[1]
     out = torch.zeros_like(q)

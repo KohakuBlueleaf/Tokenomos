@@ -21,9 +21,14 @@ import torch
 import triton
 import triton.language as tl
 
-from tokenomos.core.floats import tl_dtype
+from tokenomos.core.floats import is_volta, tl_dtype
 from tokenomos.kernels.gdn.fla.index import chunk_indices_host
 from tokenomos.kernels.mxfp8.ops import gpu_slug
+
+try:
+    from tokenomos.kernels.gdn import volta
+except ImportError:  # Volta's products need TileLang
+    volta = None
 
 BT = 16
 BT_SIZES = (16, 32, 64)
@@ -102,6 +107,28 @@ def _gram_kernel(
     b_a = tl.where(o_b[:, None] > o_b[None, :], b_kk * r, 0.0)
     b_w = tl.where(o_b[:, None] >= o_b[None, :], b_qk * r, 0.0)
     p_a = (i_c * H + i_h) * (BT * BT) + o_b[:, None] * BT + o_b[None, :]
+    tl.store(A + p_a, (b_a * b_beta[:, None]).to(tl.float16))
+    tl.store(W + p_a, b_w.to(W.dtype.element_ty))
+
+
+@triton.jit
+def _gates_kernel(beta, g, gc, A, W, KK, QK, cu, chunks, H: tl.constexpr, BT: tl.constexpr):
+    """``_gram_kernel``'s end over products already made, vector-only (Volta)."""
+    i_h, i_c = tl.program_id(0), tl.program_id(1)
+    i_n, i_t = tl.load(chunks + 2 * i_c), tl.load(chunks + 2 * i_c + 1)
+    bos = tl.load(cu + i_n).to(tl.int64)
+    n = tl.load(cu + i_n + 1).to(tl.int64) - bos
+    o_b = tl.arange(0, BT)
+    o_t = i_t * BT + o_b
+    m_t = o_t < n
+    p_g = (bos + o_t) * H + i_h
+    b_beta = tl.load(beta + p_g, mask=m_t, other=0.0)
+    b_g = tl.cumsum(tl.load(g + p_g, mask=m_t, other=0.0), 0)
+    tl.store(gc + p_g, b_g, mask=m_t)
+    r = tl.exp(b_g[:, None] - b_g[None, :])
+    p_a = (i_c * H + i_h) * (BT * BT) + o_b[:, None] * BT + o_b[None, :]
+    b_a = tl.where(o_b[:, None] > o_b[None, :], tl.load(KK + p_a) * r, 0.0)
+    b_w = tl.where(o_b[:, None] >= o_b[None, :], tl.load(QK + p_a) * r, 0.0)
     tl.store(A + p_a, (b_a * b_beta[:, None]).to(tl.float16))
     tl.store(W + p_a, b_w.to(W.dtype.element_ty))
 
@@ -270,6 +297,14 @@ def gram(q, k, beta, g, cu, chunks, bt: int):
     gc = torch.empty_like(g)
     A = torch.empty(nc * hv, bt, bt, dtype=torch.float16, device=q.device)
     W = torch.empty(nc * hv, bt, bt, dtype=q.dtype, device=q.device)
+    if is_volta(q.device):
+        kk = torch.empty(nc * hv, bt, bt, dtype=torch.float32, device=q.device)
+        qk = torch.empty_like(kk)
+        volta.gram(q, k, cu, chunks, kk, qk, min(BK, kd), hv, bt)
+        _gates_kernel[(hv, nc)](
+            beta, g, gc, A, W, kk, qk, cu, chunks, H=hv, BT=bt, num_warps=4, num_stages=2
+        )
+        return gc, A, W
     _gram_kernel[(hv, nc)](
         q,
         k,
@@ -307,6 +342,9 @@ def advance(q, k, v, gc, beta, Ti, W, out, initial_state, cu, starts, scale, til
     if vd % bv or bv > vd:
         raise ValueError(f"GDN prefill: V {vd} must be a multiple of {bv} state rows")
     final = torch.empty_like(initial_state)
+    if is_volta(q.device):
+        volta.state(q, k, v, gc, beta, Ti, W, out, initial_state, final, cu, starts, scale, bv)
+        return final
     _state_kernel[(vd // bv, (cu.shape[0] - 1) * hv)](
         q,
         k,

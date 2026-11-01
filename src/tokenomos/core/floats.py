@@ -9,6 +9,8 @@ kernels read their dtype from their tensors (``tl_dtype`` gives a kernel's ``tl.
 ``default`` touches CUDA: spawned prep workers import this module.
 """
 
+from functools import cache
+
 import torch
 import triton.language as tl
 
@@ -45,6 +47,13 @@ def default(device: torch.device | str) -> str:
     if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] < 8:
         return "fp16"
     return "bf16"
+
+
+@cache
+def is_volta(device: torch.device | str) -> bool:
+    """Whether ``device`` is sm70: no MMA from Triton, its ``tl.dot`` runs on vector units."""
+    device = torch.device(device)
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) == (7, 0)
 
 
 def tl_dtype(dtype: torch.dtype) -> tl.dtype:

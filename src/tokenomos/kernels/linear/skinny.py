@@ -8,6 +8,13 @@ import torch
 import triton
 import triton.language as tl
 
+from tokenomos.core.floats import is_volta
+
+try:
+    from tokenomos.kernels.linear import volta
+except ImportError:  # Volta's product needs TileLang
+    volta = None
+
 MAX_N = 64
 
 
@@ -45,6 +52,8 @@ def _skinny_kernel(
 
 def linear(x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
     """``x`` [M, K] (row stride free) times ``w`` [N, K] contiguous -> [M, N] in ``x``'s dtype."""
+    if is_volta(x.device):
+        return volta.linear(x, w, bias)
     m, k = x.shape
     n = w.shape[0]
     out = torch.empty(m, n, dtype=x.dtype, device=x.device)
