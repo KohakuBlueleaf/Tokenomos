@@ -37,7 +37,7 @@ Repository = "https://github.com/KohakuBlueleaf/Tokenomos"
 [project.optional-dependencies]
 # FlashInfer: b12x MXFP8 GEMMs and NVFP4 GEMMs; transformers: reference models in tests only
 gpu = ["flashinfer-python>=0.6; sys_platform != 'win32'"]
-# W8A8 on Ampere and Turing tensor cores
+# W8A8 on Ampere and Turing tensor cores; every matmul on Volta
 tensorcore = ["tilelang>=0.1.15"]
 dev = ["maturin>=1.7,<2", "pytest>=8", "ruff", "black", "transformers>=5"]
 

@@ -54,7 +54,7 @@ uv pip install -e ".[gpu,tensorcore,dev]"     # add torch from the index matchin
 | Extra | Adds |
 |---|---|
 | `gpu` | FlashInfer: MXFP8 and NVFP4 GEMMs, the GDN prefill (Linux, sm90 and up) |
-| `tensorcore` | TileLang 0.1.15: W8A8 and the fp16 route (needs nvcc and a host compiler) |
+| `tensorcore` | TileLang 0.1.15: W8A8, the fp16 route and every matmul on sm70 (needs nvcc and a host compiler; CUDA 12.x on sm70) |
 | `dev` | pytest, ruff, black, transformers for the reference models in the tests |
 
 Building needs a Rust toolchain for the extension `tokenomos._rs`. `maturin develop --release`
@@ -198,6 +198,7 @@ graph and reads an event.
 | RTX 4090, sm89 | Windows | bf16, FP8, W8A8 | `fused` | 359 pass, 60 skipped |
 | RTX 3090, sm86 | Linux | bf16, fp16, `fp32`, W8A8 | `fused` | 322 pass, 97 skipped |
 | RTX 2080 Ti, sm75 | Linux | fp16, `fp32`, W8A8 | `fused` | 218 pass, 201 skipped |
+| Tesla PG503-216, sm70 | Linux | fp16, `fp32` | `fused` | 217 pass, 202 skipped |
 
 Skips are what the card cannot run: MXFP8 and NVFP4 need sm100 (on an RTX 4090 cuBLAS answers
 `NOT_SUPPORTED` for MXFP8 and ptxas rejects the NVFP4 kernels), FP8 needs sm89, bf16 needs sm80.
