@@ -105,8 +105,15 @@ def shared_prefix(messages: list[dict], ids: list[int], kw: dict) -> int:
 
 
 def job(task):
-    """(messages, template kwargs) -> (prompt ids, images, shared prefix length): images as
-    ``(slot, shape)`` pairs with a ring, else uint8 tensors."""
+    """(messages, template kwargs) -> (prompt ids, images, shared prefix length, stamps): images
+    as ``(slot, shape)`` pairs with a ring, else uint8 tensors; stamps (``time.time``): the job's
+    start, its images prepared, and its end (after any wait for ring slots)."""
+    start = time.time()
+    ids, images, prefix, prepared = _job(task)
+    return ids, images, prefix, (start, prepared, time.time())
+
+
+def _job(task):
     messages, kw = task
     text, srcs = _S["template"].render(messages, **kw)
     proc = _S["processor"]
@@ -119,9 +126,10 @@ def job(task):
     wrap = getattr(proc, "wrap", None)
     ids = expand(ids, [proc.tokens(im) for im in images], _S["image_token"], wrap)
     prefix = shared_prefix(messages, ids, kw)
+    prepared = time.time()
     ring = _S["ring"]
     if ring is None:
-        return ids, images, prefix
+        return ids, images, prefix, prepared
     if any(im.numel() > ring.slot_bytes for im in images):
         raise ValueError(f"a prepared image is over the ring slot size {ring.slot_bytes}")
-    return ids, [ring.write(im) for im in images], prefix
+    return ids, [ring.write(im) for im in images], prefix, prepared

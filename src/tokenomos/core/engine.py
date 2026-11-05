@@ -76,6 +76,12 @@ class Request:
     # image runs ``(first, end)`` of a model with bidirectional runs; filled at submit
     runs: list[tuple[int, int]] = field(default_factory=list)
     result: "Result | None" = None
+    # wall-clock stamps (``time.time``) of the request's stages: ``chat`` / ``prep_start`` /
+    # ``prepared`` / ``prep_end`` / ``ready`` (``LLM.submit_chat``), ``submit``, ``queued``,
+    # ``inbox`` (taken off the inbox), ``admit``, ``prefilled`` (its last prefill chunk
+    # launched), ``done``; and sizes: ``images``, ``pixels`` (prepared), ``cached`` prompt
+    # tokens (a prefix hit)
+    times: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -253,6 +259,43 @@ class Engine:
         self.step_id = self.iteration = self.admitted = 0
         self.admitted_at: dict[int, int] = {}
         self.stats = Stats()
+        # ``trace_on()``: one record per loop iteration (host seconds per phase, queue gauges)
+        # and the (iteration, kind, start, end) CUDA event pairs of its encode / prefill / decode
+        self.trace: list[dict] | None = None
+        self.trace_spans: list[tuple] = []
+        self._it: dict | None = None
+        # the engine thread appends under it; ``trace_take`` swaps under it (any thread)
+        self.trace_lock = threading.Lock()
+
+    def trace_on(self) -> None:
+        """Record every loop iteration from now on (``trace_take`` hands them over)."""
+        with self.trace_lock:
+            self.trace, self.trace_spans = [], []
+
+    def trace_take(self) -> list[dict]:
+        """The iteration records finished since the last take, with their GPU milliseconds per
+        kind (waits for their events); spans of an iteration not finished yet stay for the next
+        take. Any thread."""
+        with self.trace_lock:
+            if self.trace is None:
+                return []
+            recs, spans = self.trace, self.trace_spans
+            self.trace, self.trace_spans = [], []
+        by_it = {r["it"]: r for r in recs}
+        later = []
+        for span in spans:
+            it, kind, a, b = span
+            rec = by_it.get(it)
+            if rec is None:
+                later.append(span)
+                continue
+            b.synchronize()
+            key = f"{kind}_gpu_ms"
+            rec[key] = rec.get(key, 0.0) + a.elapsed_time(b)
+        if later:
+            with self.trace_lock:
+                self.trace_spans[:0] = later
+        return recs
 
     # ---- device work ----
 
@@ -374,6 +417,10 @@ class Engine:
             self._timed("prefill", self._prefill, chunk, mm)
             if reached:
                 self._snapshot(reached)
+        now = time.time()
+        for (_, r), run in zip(admits, runs):
+            r.times["prefilled"] = now
+            r.times["cached"] = run.start
 
     def _restore(self, hits: list[tuple[int, _Run]]) -> None:
         """Hit slots start from their entry: its pages first in the table, its rows restored."""
@@ -402,11 +449,18 @@ class Engine:
     def _timed(self, kind: str, fn, *args):
         a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         nvtx.range_push(kind)
+        h0 = time.perf_counter()
         a.record()
         out = fn(*args)
         b.record()
         nvtx.range_pop()
         self.stats.spans.append((kind, a, b))
+        it = self._it
+        if it is not None:
+            with self.trace_lock:
+                self.trace_spans.append((it["it"], kind, a, b))
+            it[f"{kind}_host_s"] = it.get(f"{kind}_host_s", 0.0) + time.perf_counter() - h0
+            it[f"{kind}_n"] = it.get(f"{kind}_n", 0) + 1
         return out
 
     def _encode(self, admits: list[tuple[int, Request]]):
@@ -416,6 +470,12 @@ class Engine:
         if not imgs:
             return None
         enc = self.model.encoders["image"]
+        it = self._it
+        if it is not None:
+            it["enc_images"] = it.get("enc_images", 0) + len(imgs)
+            it["enc_pixels"] = it.get("enc_pixels", 0) + sum(
+                im.shape[0] * im.shape[1] for im in imgs
+            )
         feats = enc([im.to(self.device, non_blocking=True) for im in imgs], self.staging.put)
         copied = torch.cuda.Event()
         copied.record()
@@ -529,12 +589,19 @@ class Engine:
             kslots.append(st.lst, st.n, fslot, count)
         self.stats.prefill_tokens += cu_host[-1]
         self.stats.prefill_forwards += 1
+        it = self._it
+        if it is not None:
+            it["pf_tokens"] = it.get("pf_tokens", 0) + cu_host[-1]
+            it["pf_seqs"] = it.get("pf_seqs", 0) + len(chunk)
 
     # ---- host loop ----
 
     def submit(self, req: Request) -> None:
         """Queue ``req`` (any thread); the loop picks it up on its next iteration. A request the
         engine could not serve fails here: past this point an error ends the engine thread."""
+        req.times["submit"] = time.time()
+        req.times["images"] = len(req.images)
+        req.times["pixels"] = sum(int(im.shape[0]) * int(im.shape[1]) for im in req.images)
         if req.max_new < 1:
             raise ValueError(f"max_new {req.max_new}: a reply has at least one token")
         if len(req.prompt) + req.max_new > self.max_len or req.max_new > self.new_cap:
@@ -562,6 +629,7 @@ class Engine:
             req.runs = imageprep.runs(req.prompt, self.model.image_token)
         # pinned on the caller's thread, so the loop's image copies never block it
         req.images = [im if im.is_pinned() else im.pin_memory() for im in req.images]
+        req.times["queued"] = time.time()
         self.inbox.put(req)
 
     def warmup(self, lengths=None) -> None:
@@ -608,24 +676,44 @@ class Engine:
         waiting, outs = self.waiting, deque()
         bound, start = 0, time.perf_counter()
         while True:
+            taken = 0
             while True:
                 try:
-                    waiting.append(self.inbox.get_nowait())
+                    r = self.inbox.get_nowait()
                 except queue.Empty:
                     break
+                r.times["inbox"] = time.time()
+                waiting.append(r)
+                taken += 1
             if not waiting and not self.running and not outs:
                 self._release(block=True)
                 if stop is None or stop.is_set():
                     break
                 nvtx.range_push("idle")
                 try:
-                    waiting.append(self.inbox.get(timeout=0.02))
+                    r = self.inbox.get(timeout=0.02)
+                    r.times["inbox"] = time.time()
+                    waiting.append(r)
+                    taken += 1
                 except queue.Empty:
                     continue
                 finally:
                     nvtx.range_pop()
             t0, wait = time.perf_counter(), 0.0
+            it = None
+            if self.trace is not None:
+                it = self._it = {
+                    "it": self.iteration,
+                    "t": time.time(),
+                    "inbox": taken,
+                    "waiting": len(waiting),
+                    "running": len(self.running),
+                    "free_slots": len(self.free_slots),
+                    "free_pages": self.free_pages,
+                }
             self.staging.begin(self.iteration)
+            if it is not None:
+                it["begin_s"] = time.perf_counter() - t0
             admits, tokens = [], 0
             if self.prefix is not None:
                 self.prefix.settle()
@@ -651,22 +739,43 @@ class Engine:
                     self.streaming.add(s)
                 admits.append((s, r))
                 tokens += left
+            if it is not None:
+                it["plan_s"] = time.perf_counter() - t0 - it["begin_s"]
+                it["admits"] = len(admits)
+                it["admit_tokens"] = tokens
+                it["held"] = hold
             if admits:
                 a0 = time.perf_counter()
+                stamp = time.time()
+                for _, r in admits:
+                    r.times["admit"] = stamp
                 nvtx.range_push(f"admit {len(admits)}")
                 self._admit(admits)
                 nvtx.range_pop()
                 self.stats.admit_host_s += time.perf_counter() - a0
+                if it is not None:
+                    it["admit_s"] = time.perf_counter() - a0
                 self.admitted += len(admits)
                 bound += len(admits)
             queued = bound > 0
             if queued:
                 b = next(x for x in self.buckets if x >= bound)
                 nvtx.range_push(f"decode {b}")
+                d0 = time.perf_counter()
+                if it is not None:
+                    da = torch.cuda.Event(enable_timing=True)
+                    da.record()
                 if self.graphs:
                     self.graphs[b].replay()
                 else:
                     self._decode_body(b)
+                if it is not None:
+                    db = torch.cuda.Event(enable_timing=True)
+                    db.record()
+                    with self.trace_lock:
+                        self.trace_spans.append((it["it"], "decode", da, db))
+                    it["decode_b"], it["decode_rows"] = b, bound
+                    it["decode_s"] = time.perf_counter() - d0
                 k = self.step_id % 2
                 self.ev_host[k].copy_(self.ev_dev, non_blocking=True)
                 self.ev[k].record()
@@ -686,19 +795,36 @@ class Engine:
                 self.ev[e % 2].synchronize()
                 nvtx.range_pop()
                 wait += time.perf_counter() - w0
+                r0 = time.perf_counter()
                 bound = self._read(e, outs) + self.admitted - self.admitted_at.pop(e)
                 for old in [x for x in self.admitted_at if x < e]:
                     del self.admitted_at[old]
+                if it is not None:
+                    it["read_s"] = time.perf_counter() - r0
             elif not queued and outs:
                 # nothing left on the GPU but the token copies
+                w0 = time.perf_counter()
                 outs[0][0].synchronize()
+                wait += time.perf_counter() - w0
+            c0 = time.perf_counter()
+            done = 0
             while outs and outs[0][0].query():
+                done += len(outs[0][2]) if outs[0][4] else 0
                 _collect(outs.popleft())
+            c1 = time.perf_counter()
             self._release(block=False)
             self.collect_spans(block=False)
             self.iteration += 1
             self.stats.wait_s += wait
             self.stats.host_s += time.perf_counter() - t0 - wait
+            if it is not None:
+                it["wait_s"] = wait
+                it["collect_s"], it["finished"] = c1 - c0, done
+                it["tail_s"] = time.perf_counter() - c1
+                it["host_s"] = time.perf_counter() - t0 - wait
+                with self.trace_lock:
+                    self.trace.append(it)
+                self._it = None
         self.stats.wall_s += time.perf_counter() - start
         self.collect_spans()
 
@@ -887,5 +1013,6 @@ def _collect(item) -> None:
         stop = bool(toks) and toks[-1] in req.stop
         states = tr[:n] if req.grammar is not None else None
         req.result = Result(toks, "stop" if stop else "length", states)
+        req.times["done"] = time.time()
         if req.on_done is not None:
             req.on_done(req)

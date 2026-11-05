@@ -14,6 +14,7 @@ import json
 import multiprocessing
 import queue
 import threading
+import time
 from collections.abc import Iterator
 from concurrent.futures import Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass
@@ -90,6 +91,9 @@ class LLM:
         ``grammar_kw`` to ``DeviceGrammar``. ``own_stream``: the engine thread serves on a CUDA
         stream of its own, apart from other engines in the process."""
         self.own_stream = own_stream
+        # conversations submitted whose preparation has not finished (a gauge)
+        self.prep_pending = 0
+        self._prep_lock = threading.Lock()
         self.path = Path(model)
         self.model = models.load(model, device, arch)
         self.tokenizer = Tokenizer.from_file(str(self.path / "tokenizer.json"))
@@ -273,17 +277,24 @@ class LLM:
         """Prepare ``conversation`` (prep pool) and queue it; the future resolves to the finished
         Request (``output`` turns it into text). ``on_tokens``: ``Request.on_tokens``."""
         out: Future = Future()
+        chat = time.time()
+        with self._prep_lock:
+            self.prep_pending += 1
 
         def ready(job: Future):
             release = None
+            with self._prep_lock:
+                self.prep_pending -= 1
             try:
-                ids, images, prefix = job.result()
+                ids, images, prefix, (p0, p1, p2) = job.result()
                 if self.ring is not None:
                     slots = [s for s, _ in images]
                     release = lambda: self.ring.release(slots)  # noqa: E731
                     images = [self.ring.view(s, shape) for s, shape in images]
                 req = self.request(ids, p, images)
                 req.prefix, req.on_tokens, req.release = prefix, on_tokens, release
+                req.times.update(chat=chat, prep_start=p0, prepared=p1, prep_end=p2)
+                req.times["ready"] = time.time()
                 req.on_done = lambda r: out.set_result(r)
                 self.engine.submit(req)
             except BaseException as e:  # noqa: BLE001 - a bad conversation fails its future

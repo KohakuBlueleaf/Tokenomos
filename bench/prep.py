@@ -157,7 +157,7 @@ def main() -> None:
         t["result"].append(t5 - t4)
         t["submit"].append(t6 - t5)
         t0 = time.perf_counter()
-        got, got_slots, got_prefix = worker.job(task)
+        got, got_slots, got_prefix, _ = worker.job(task)
         t["job"].append(time.perf_counter() - t0)
         if got != ids or got_prefix != prefix:
             raise RuntimeError("the timed stages diverge from worker.job")

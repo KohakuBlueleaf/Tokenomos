@@ -57,7 +57,7 @@ def main() -> None:
     worst = {k: [] for k in runs}
     pair = {f"{a}|{b}": [] for a, b in combinations(runs, 2)}
     for i, conv in enumerate(rows):
-        prompt, images, _ = worker.job((conv, {"enable_thinking": False}))
+        prompt, images, _, _ = worker.job((conv, {"enable_thinking": False}))
         for name, toks in runs.items():
             gen = toks[i]
             lp = logprobs(model, prompt + gen[:-1], images)[len(prompt) - 1 :]
