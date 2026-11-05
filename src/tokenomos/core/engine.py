@@ -310,8 +310,16 @@ class Engine:
                 self._decode_body(b)
             torch.cuda.current_stream().wait_stream(side)
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, pool=pool):
-                self._decode_body(b)
+            # The graph owns the cuBLAS workspace it records: PyTorch's per-stream workspace is
+            # held only by its own map, which any later capture in the process may clear (and
+            # free under this graph); cleared before, the workspace lands in this graph's pool,
+            # cleared after, no later call reuses that block outside it
+            torch._C._cuda_clearCublasWorkspaces()
+            try:
+                with torch.cuda.graph(g, pool=pool):
+                    self._decode_body(b)
+            finally:
+                torch._C._cuda_clearCublasWorkspaces()
             self.graphs[b] = g
         torch.cuda.synchronize()
 
